@@ -61,8 +61,8 @@ function parseJson(raw: Buffer): unknown {
 
 function bearerToken(req: ForgeRequest): string {
   const auth = req.headers.authorization ?? '';
-  if (!auth.startsWith('Bearer ')) return '';
-  return auth.slice(7);
+  const m = /^Bearer\s+(.+)$/.exec(auth);
+  return m !== null ? (m[1] as string) : '';
 }
 
 /** The request id every reply carries (non-empty; format is free). */
@@ -79,17 +79,8 @@ export function createForge(): Server {
     const requestId = nextRequestId();
     const baseHeaders: Record<string, string> = { 'x-github-request-id': requestId };
     try {
-      // Split target by hand instead of `new URL()`: the full URL parse (object
-      // + validation + normalization) costs ~2-3 µs on every request and the
-      // handlers only need the pathname and the query params. Percent-decoding
-      // is preserved (only when a '%' is present); a bad escape still throws
-      // and the outer catch answers 500, as the URL constructor did.
-      const rawTarget = req.url ?? '/';
-      const qIndex = rawTarget.indexOf('?');
-      let path = qIndex < 0 ? rawTarget : rawTarget.slice(0, qIndex);
-      if (path.includes('%')) path = decodeURIComponent(path);
-      const query = new URLSearchParams(qIndex < 0 ? '' : rawTarget.slice(qIndex + 1));
-      const url = { pathname: path, searchParams: query };
+      const url = new URL(req.url ?? '/', 'http://entry');
+      const path = url.pathname;
       const method = req.method ?? 'GET';
       const host = req.headers.host ?? '127.0.0.1';
       const baseUrl = `http://${host}`;
