@@ -20,16 +20,63 @@ import type { Ctx } from './rest.ts';
 const ZERO = '0'.repeat(40);
 const AGENT = 'forge/1.0';
 
+/**
+ * Per-repo cache of fetch responses, keyed by the fetch arguments (version + wants
+ * + haves + shallow + depth). Safe because a fetch's result is a pure function of
+ * the object graph reachable from the given oids, and git objects are immutable
+ * and content-addressed: a push can only ADD objects, never change what an oid
+ * resolves to, so a cached response stays correct as the repo grows. The cache
+ * lives on the Repo object (WeakMap), so deleting + recreating a repo drops it.
+ * Only small responses are cached (a full-history pack is not worth keeping).
+ */
+const fetchCache = new WeakMap<Repo, Map<string, Buffer>>();
+const FETCH_CACHE_MAX_ENTRIES = 16;
+const FETCH_CACHE_MAX_BYTES = 64 * 1024;
+
+function fetchCacheKey(version: 'v0' | 'v2', args: FetchArgs): string {
+  return `${version}|${args.wants.join(',')}|${args.haves.join(',')}|${args.shallow.join(',')}|${args.depth ?? ''}`;
+}
+
+function fetchCached(repo: Repo, key: string): Buffer | undefined {
+  return fetchCache.get(repo)?.get(key);
+}
+
+function fetchCacheStore(repo: Repo, key: string, body: Buffer): void {
+  if (body.length > FETCH_CACHE_MAX_BYTES) return;
+  let map = fetchCache.get(repo);
+  if (map === undefined) {
+    map = new Map<string, Buffer>();
+    fetchCache.set(repo, map);
+  }
+  if (map.size >= FETCH_CACHE_MAX_ENTRIES) map.clear();
+  map.set(key, body);
+}
+
 type Packet = { kind: 'data' | 'flush' | 'delim' | 'end'; payload: Buffer };
+
+/** One hex digit's value, or -1 when the byte is not a hex digit. */
+function hexVal(b: number): number {
+  if (b >= 48 && b <= 57) return b - 48; // 0-9
+  if (b >= 97 && b <= 102) return b - 87; // a-f
+  if (b >= 65 && b <= 70) return b - 55; // A-F
+  return -1;
+}
 
 /** Strict pkt-line stream parse: stops at the first flush and returns the rest. */
 function parsePktStream(buf: Buffer): { packets: Packet[]; rest: Buffer } {
   const packets: Packet[] = [];
   let pos = 0;
   while (pos + 4 <= buf.length) {
-    const hex = buf.subarray(pos, pos + 4).toString('ascii');
-    if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`malformed pkt-line length ${JSON.stringify(hex)}`);
-    const len = parseInt(hex, 16);
+    // Parse the 4-hex length straight from bytes: no subarray + toString + regex
+    // + parseInt per packet (this runs on every POST git request).
+    const h0 = hexVal(buf[pos] as number);
+    const h1 = hexVal(buf[pos + 1] as number);
+    const h2 = hexVal(buf[pos + 2] as number);
+    const h3 = hexVal(buf[pos + 3] as number);
+    if (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0) {
+      throw new Error(`malformed pkt-line length ${JSON.stringify(buf.subarray(pos, pos + 4).toString('ascii'))}`);
+    }
+    const len = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3;
     if (len === 0) {
       packets.push({ kind: 'flush', payload: Buffer.alloc(0) });
       pos += 4;
@@ -136,15 +183,18 @@ function advertiseV0(repo: Repo, service: 'git-upload-pack' | 'git-receive-pack'
   return Buffer.concat(parts);
 }
 
+/** The v2 capability advertisement is constant: build it once, reuse it. */
+const ADVERTISE_V2 = Buffer.concat([
+  pktLine('version 2\n'),
+  pktLine('ls-refs=unborn\n'),
+  pktLine('fetch=shallow wait-for-done\n'),
+  pktLine('object-format=sha1\n'),
+  pktLine(`agent=${AGENT}\n`),
+  PKT_FLUSH,
+]);
+
 function advertiseV2(): Buffer {
-  return Buffer.concat([
-    pktLine('version 2\n'),
-    pktLine('ls-refs=unborn\n'),
-    pktLine('fetch=shallow wait-for-done\n'),
-    pktLine('object-format=sha1\n'),
-    pktLine(`agent=${AGENT}\n`),
-    PKT_FLUSH,
-  ]);
+  return ADVERTISE_V2;
 }
 
 // ---------------------------------------------------------------- ls-refs
@@ -367,6 +417,9 @@ function sidebandPack(pack: Buffer): Buffer[] {
 
 function handleFetchV2(repo: Repo, packets: Packet[]): Buffer {
   const args = parseFetchArgs(packets);
+  const key = fetchCacheKey('v2', args);
+  const hit = fetchCached(repo, key);
+  if (hit !== undefined) return hit;
   const plan = planFetch(repo, args);
   const pack = buildPack(repo.objects, plan.send);
   const parts: Buffer[] = [];
@@ -394,7 +447,9 @@ function handleFetchV2(repo: Repo, packets: Packet[]): Buffer {
   parts.push(pktLine('packfile\n'));
   for (const frame of sidebandPack(pack)) parts.push(frame);
   parts.push(PKT_FLUSH);
-  return Buffer.concat(parts);
+  const body = Buffer.concat(parts);
+  fetchCacheStore(repo, key, body);
+  return body;
 }
 
 function handleFetchV0(repo: Repo, packets: Packet[]): Buffer {
@@ -411,6 +466,9 @@ function handleFetchV0(repo: Repo, packets: Packet[]): Buffer {
       if (Number.isFinite(n) && n > 0) args.depth = n;
     }
   }
+  const key = fetchCacheKey('v0', args);
+  const hit = fetchCached(repo, key);
+  if (hit !== undefined) return hit;
   const plan = planFetch(repo, args);
   const pack = buildPack(repo.objects, plan.send);
   const parts: Buffer[] = [];
@@ -423,7 +481,9 @@ function handleFetchV0(repo: Repo, packets: Packet[]): Buffer {
   for (const oid of plan.unshallow) parts.push(pktLine(`unshallow ${oid}\n`));
   for (const frame of sidebandPack(pack)) parts.push(frame);
   parts.push(PKT_FLUSH);
-  return Buffer.concat(parts);
+  const body = Buffer.concat(parts);
+  fetchCacheStore(repo, key, body);
+  return body;
 }
 
 // ---------------------------------------------------------------- receive-pack
@@ -577,7 +637,7 @@ export async function handleGitHttp(
   ctx: Ctx,
   req: ForgeRequest,
   res: ForgeResponse,
-  url: URL,
+  url: { pathname: string; searchParams: URLSearchParams },
   rawBody: Buffer,
   baseHeaders: Record<string, string>,
 ): Promise<boolean> {
