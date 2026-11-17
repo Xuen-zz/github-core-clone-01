@@ -118,12 +118,11 @@ export class ForgeResponse {
     let head = `HTTP/1.1 ${this.status} ${REASONS[this.status] ?? 'OK'}\r\n`;
     for (const key of Object.keys(this.headers)) head += `${key}: ${this.headers[key]}\r\n`;
     if (!this.keepAlive) head += 'connection: close\r\n';
-    // Single allocation for head + payload (Buffer.concat would allocate the head
-    // string buffer and then copy it again); chunked only when no Content-Length.
+    let out: Buffer;
     if (!hasLength) {
+      // No Content-Length: node:http would use chunked framing; do the same.
       head += 'transfer-encoding: chunked\r\n';
-      const headBuf = Buffer.from(`${head}\r\n`, 'ascii');
-      const parts: Buffer[] = [headBuf];
+      const parts: Buffer[] = [Buffer.from(`${head}\r\n`, 'ascii')];
       if (!isHead && payload.length > 0) {
         parts.push(
           Buffer.from(`${payload.length.toString(16)}\r\n`, 'ascii'),
@@ -132,19 +131,15 @@ export class ForgeResponse {
         );
       }
       parts.push(Buffer.from('0\r\n\r\n', 'ascii'));
-      const out = Buffer.concat(parts);
-      if (!this.socket.destroyed) this.socket.write(out);
+      out = Buffer.concat(parts);
     } else {
-      const headBuf = Buffer.from(`${head}\r\n`, 'ascii');
-      const out = Buffer.allocUnsafe(headBuf.length + (isHead ? 0 : payload.length));
-      headBuf.copy(out, 0);
-      if (!isHead) payload.copy(out, headBuf.length);
-      if (!this.socket.destroyed) {
-        // Keep-alive (the common case): no write callback — it only closes the
-        // socket, which is a no-op here, and costs a closure + a tick per response.
-        if (this.keepAlive) this.socket.write(out);
-        else this.socket.write(out, () => this.socket.end());
-      }
+      // HEAD: headers (with the Content-Length as set) but no body bytes.
+      out = Buffer.concat([Buffer.from(`${head}\r\n`, 'ascii'), isHead ? Buffer.alloc(0) : payload]);
+    }
+    if (!this.socket.destroyed) {
+      this.socket.write(out, () => {
+        if (!this.keepAlive) this.socket.end();
+      });
     }
   }
 }
@@ -160,44 +155,24 @@ interface ParsedRequest {
   keepAlive: boolean;
 }
 
-/**
- * Parse the request line + headers directly from the buffer (no split array, no
- * whole-block string): scan for CRLF line ends and ':' separators, slicing each
- * name/value out. Header names arrive lowercase from the harness clients; the
- * lowercasing pass only runs when a name actually contains an uppercase byte.
- */
-function parseHeaders(buf: Buffer, headerEnd: number): { method: string; target: string; version: string; headers: Record<string, string> } {
-  const sp1 = buf.indexOf(0x20, 0);
-  const sp2 = buf.indexOf(0x20, sp1 + 1);
+function parseHeaders(headText: string): { method: string; target: string; version: string; headers: Record<string, string> } {
+  const lines = headText.split('\r\n');
+  const requestLine = lines[0] as string;
+  const sp1 = requestLine.indexOf(' ');
+  const sp2 = requestLine.indexOf(' ', sp1 + 1);
   if (sp1 < 0 || sp2 < 0) throw new Error('bad request line');
-  const lineEnd = buf.indexOf(0x0d, sp2 + 1);
-  if (lineEnd < 0 || lineEnd > headerEnd) throw new Error('bad request line');
-  const method = buf.subarray(0, sp1).toString('ascii');
-  const target = buf.subarray(sp1 + 1, sp2).toString('ascii');
-  const version = buf.subarray(sp2 + 1, lineEnd).toString('ascii');
+  const method = requestLine.slice(0, sp1);
+  const target = requestLine.slice(sp1 + 1, sp2);
+  const version = requestLine.slice(sp2 + 1);
   const headers: Record<string, string> = {};
-  let pos = lineEnd + 2;
-  while (pos < headerEnd) {
-    const eol = buf.indexOf(0x0d, pos);
-    if (eol < 0 || eol > headerEnd) break;
-    const colon = buf.indexOf(0x3a, pos);
-    if (colon < 0 || colon >= eol) {
-      pos = eol + 2;
-      continue;
-    }
-    let name = buf.subarray(pos, colon).toString('ascii').trim();
-    // Fast path: names are already lowercase; only pay for toLowerCase when needed.
-    for (let i = 0; i < name.length; i += 1) {
-      const c = name.charCodeAt(i);
-      if (c >= 65 && c <= 90) {
-        name = name.toLowerCase();
-        break;
-      }
-    }
-    const value = buf.subarray(colon + 1, eol).toString('ascii').trim();
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i] as string;
+    const colon = line.indexOf(':');
+    if (colon < 0) continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
     const prev = headers[name];
     headers[name] = prev === undefined ? value : `${prev}, ${value}`;
-    pos = eol + 2;
   }
   return { method, target, version, headers };
 }
@@ -210,7 +185,7 @@ function parseRequest(buf: Buffer): { req: ParsedRequest; consumed: number } | n
     if (buf.length > MAX_HEADER_BYTES) throw new Error('headers too large');
     return null;
   }
-  const { method, target, version, headers } = parseHeaders(buf, headerEnd);
+  const { method, target, version, headers } = parseHeaders(buf.subarray(0, headerEnd).toString('ascii'));
   const bodyStart = headerEnd + 4;
   const connection = (headers['connection'] ?? '').toLowerCase();
   const keepAlive = version === 'HTTP/1.1' ? connection !== 'close' : connection === 'keep-alive';
