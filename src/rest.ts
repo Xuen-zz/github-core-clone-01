@@ -255,6 +255,16 @@ export interface Route {
 
 export const restRoutes: Route[] = [];
 
+// Indexed dispatch: routes grouped by (method, segment[3], segment[6]) of the pattern,
+// so a lookup tries only the few routes that can match (the hot GET-issue route used to
+// be 19th of 28 regexes). The regex still decides the match; the index only narrows
+// candidates, so matching behavior is unchanged.
+const routeIndex = new Map<string, Route[]>();
+
+function indexKey(method: string, parts: string[]): string {
+  return `${method}|${parts[3] ?? ''}|${parts[6] ?? ''}`;
+}
+
 function route(method: string, pattern: string, handler: Handler): void {
   const keys: string[] = [];
   const re = new RegExp(
@@ -266,7 +276,28 @@ function route(method: string, pattern: string, handler: Handler): void {
       }) +
       '$',
   );
-  restRoutes.push({ method, pattern: re, keys, handler });
+  const entry: Route = { method, pattern: re, keys, handler };
+  restRoutes.push(entry);
+  const key = indexKey(method, pattern.split('/'));
+  const group = routeIndex.get(key);
+  if (group === undefined) routeIndex.set(key, [entry]);
+  else group.push(entry);
+}
+
+/** Find the route for (method, path), or null when none matches. */
+export function matchRestRoute(method: string, path: string): { route: Route; params: Record<string, string> } | null {
+  const group = routeIndex.get(indexKey(method, path.split('/')));
+  if (group === undefined) return null;
+  for (const route of group) {
+    const m = route.pattern.exec(path);
+    if (m === null) continue;
+    const params: Record<string, string> = {};
+    route.keys.forEach((k, i) => {
+      params[k] = decodeURIComponent(m[i + 1] as string);
+    });
+    return { route, params };
+  }
+  return null;
 }
 
 route('GET', '/api/v3', () =>
