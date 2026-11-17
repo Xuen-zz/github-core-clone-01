@@ -232,23 +232,16 @@ export function buildPack(store: ObjectStore, ids: string[]): Buffer {
   header.writeUInt32BE(2, 4);
   header.writeUInt32BE(ids.length, 8);
   chunks.push(header);
-  // Incremental trailer hash: the old code Buffer.concat'ed all chunks just to
-  // hash them, then concat'ed them again for the return — two full pack copies.
-  const hash = createHash('sha1');
-  hash.update(header);
   for (const id of ids) {
     const obj = store.get(id);
     if (obj === undefined) continue;
     const code = TYPE_CODES[obj.type];
     if (code === undefined) continue;
-    const objHeader = encodePackObjectHeader(code, obj.data.length);
-    const deflated = deflateSync(obj.data, { level: 6 });
-    chunks.push(objHeader, deflated);
-    hash.update(objHeader);
-    hash.update(deflated);
+    chunks.push(encodePackObjectHeader(code, obj.data.length));
+    chunks.push(deflateSync(obj.data, { level: 6 }));
   }
-  const trailer = Buffer.from(hash.digest('hex'), 'hex');
-  chunks.push(trailer);
+  const trailer = sha1Hex(Buffer.concat(chunks));
+  chunks.push(Buffer.from(trailer, 'hex'));
   return Buffer.concat(chunks);
 }
 
