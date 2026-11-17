@@ -9,7 +9,7 @@
 // are reported as `Cannot query field "X" on type "Y".` Global ids are opaque,
 // deterministic base64url strings, stable across reads.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ForgeRequest, ForgeResponse } from './transport.ts';
 import {
   ApiError,
   diffTrees,
@@ -1203,8 +1203,8 @@ function executeRequest(ctx: Ctx, body: unknown): Record<string, unknown> {
 
 export async function handleGraphql(
   ctx: Ctx,
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   _url: URL,
   body: unknown,
   baseHeaders: Record<string, string>,
