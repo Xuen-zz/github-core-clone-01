@@ -1,0 +1,11 @@
+{
+  "name": "forge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A standalone GitHub-compatible git forge: git smart HTTP, REST v3, GraphQL v4 and MCP from one Node process.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
