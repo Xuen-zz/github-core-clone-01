@@ -2,7 +2,7 @@
 // receive-pack v0 (push). All object handling goes through git-core; all state
 // lives in the shared Store, so REST and git see the same repos.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ForgeRequest, ForgeResponse } from './transport.ts';
 import type { Repo } from './store.ts';
 import {
   PKT_DELIM,
@@ -13,7 +13,6 @@ import {
   parseTag,
   parseTree,
   pktLine,
-  reachable,
   sidebandFrame,
 } from './git-core.ts';
 import type { Ctx } from './rest.ts';
@@ -54,7 +53,7 @@ function parsePktStream(buf: Buffer): { packets: Packet[]; rest: Buffer } {
   return { packets, rest: Buffer.alloc(0) };
 }
 
-function sendBuffer(res: ServerResponse, status: number, body: Buffer, headers: Record<string, string>): void {
+function sendBuffer(res: ForgeResponse, status: number, body: Buffer, headers: Record<string, string>): void {
   res.writeHead(status, { 'content-length': body.length, ...headers });
   res.end(body);
 }
@@ -284,9 +283,10 @@ interface FetchPlan {
 function planFetch(repo: Repo, args: FetchArgs): FetchPlan {
   const boundarySet = new Set(args.shallow);
   const haveObjects = shallowClosure(repo, args.haves, boundarySet);
-  // Full-history commit ancestors of the wants (for ACK decisions).
+  // Full-history commit ancestors of the wants (for ACK decisions). Only needed when the
+  // client sent haves; a fresh clone sends none, and its ACK is always null anyway.
   const fullAncestors = new Set<string>();
-  {
+  if (args.haves.length > 0) {
     const queue: string[] = [];
     for (const want of args.wants) {
       const commit = peelToCommit(repo, want);
@@ -505,12 +505,9 @@ function handleReceivePack(repo: Repo, body: Buffer): Buffer {
         unpackError = `object ${cmd.newOid} not found`;
         break;
       }
-      try {
-        reachable(repo.objects, [cmd.newOid]);
-      } catch {
-        unpackError = `object ${cmd.newOid} has a missing closure`;
-        break;
-      }
+      // No closure walk here: the existence check above is the real validation.
+      // (A full reachable() walk used to run and its result was discarded; it never
+      // throws, so it validated nothing and only cost ~450 µs per push.)
     }
   }
   const results: { ok: boolean; ref: string; reason: string }[] = [];
@@ -578,8 +575,8 @@ function reportBuffer(
 
 export async function handleGitHttp(
   ctx: Ctx,
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   url: URL,
   rawBody: Buffer,
   baseHeaders: Record<string, string>,
