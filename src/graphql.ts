@@ -1205,7 +1205,7 @@ export async function handleGraphql(
   ctx: Ctx,
   req: ForgeRequest,
   res: ForgeResponse,
-  _url: URL,
+  _url: { pathname: string; searchParams: URLSearchParams },
   body: unknown,
   baseHeaders: Record<string, string>,
 ): Promise<boolean> {
