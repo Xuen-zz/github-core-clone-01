@@ -11,7 +11,7 @@
 // answers -32602 (never HTTP 500); a call without its required arguments answers
 // isError:true; every response echoes the request's id.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ForgeRequest, ForgeResponse } from './transport.ts';
 import { ApiError, mergePull, type Ctx } from './rest.ts';
 import { VIEWER_LOGIN, type Issue, type Pull, type Repo } from './store.ts';
 
@@ -404,8 +404,8 @@ function dispatchOne(ctx: Ctx, parsed: unknown): Record<string, unknown> | null 
 
 export async function handleMcp(
   ctx: Ctx,
-  req: IncomingMessage,
-  res: ServerResponse,
+  req: ForgeRequest,
+  res: ForgeResponse,
   _url: URL,
   _body: unknown,
   rawBody: Buffer,
