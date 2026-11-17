@@ -406,7 +406,7 @@ export async function handleMcp(
   ctx: Ctx,
   req: ForgeRequest,
   res: ForgeResponse,
-  _url: { pathname: string; searchParams: URLSearchParams },
+  _url: URL,
   _body: unknown,
   rawBody: Buffer,
   baseHeaders: Record<string, string>,
